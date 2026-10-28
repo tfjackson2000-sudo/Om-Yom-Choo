@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Droid Kick Off</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #ui {
+            position: absolute;
+            top: 15px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            color: #fff;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 0 #000;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #message {
+            position: absolute;
+            top: 40%;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            color: #ff0;
+            font-size: 48px;
+            font-weight: bold;
+            text-shadow: 4px 4px 0 #000;
+            pointer-events: none;
+            display: none;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">BLUE <span id="score-p1">0</span> - <span id="score-p2">0</span> RED</div>
+    <div id="message">GOAL!</div>
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Resize canvas to fit phone screen
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- GAME DIMENSIONS (Amiga style vertical pitch) ---
+const PITCH_W = 1000;
+const PITCH_H = 1600;
+const GOAL_W = 180;
+const GOAL_DEPTH = 40;
+
+// --- INPUT STATE (Touch + Keyboard fallback for testing on PC) ---
+const input = {
+    joyX: 0,
+    joyY: 0,
+    kickPressed: false,
+    kickCharge: 0,
+    joyOrigin: { x: 0, y: 0 },
+    joyCurrent: { x: 0, y: 0 },
+    joyTouchId: null,
+    kickTouchId: null
+};
+
+// --- GAME ENTITIES ---
+const ball = {
+    x: PITCH_W / 2,
+    y: PITCH_H / 2,
+    z: 0, // Height off ground
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    radius: 8,
+    lastKicker: null
+};
+
+const player = {
+    x: PITCH_W / 2,
+    y: PITCH_H / 2 + 120,
+    vx: 0,
+    vy: 0,
+    speed: 4.2,
+    radius: 14,
+    color: '#0066ff',
+    dirX: 0,
+    dirY: -1
+};
+
+const cpu = {
+    x: PITCH_W / 2,
+    y: PITCH_H / 2 - 120,
+    vx: 0,
+    vy: 0,
+    speed: 3.4,
+    radius: 14,
+    color: '#ff2200',
+    dirX: 0,
+    dirY: 1
+};
+
+let scoreP1 = 0;
+let scoreP2 = 0;
+let isResetting = false;
+
+const camera = { x: 0, y: 0 };
+
+// --- TOUCH CONTROLS ---
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        // Left side of screen = Virtual Joystick
+        if (t.clientX < canvas.width / 2 && input.joyTouchId === null) {
+            input.joyTouchId = t.identifier;
+            input.joyOrigin = { x: t.clientX, y: t.clientY };
+            input.joyCurrent = { x: t.clientX, y: t.clientY };
+        } 
+        // Right side of screen = Kick Button
+        else if (t.clientX >= canvas.width / 2 && input.kickTouchId === null) {
+            input.kickTouchId = t.identifier;
+            input.kickPressed = true;
+            input.kickCharge = 1;
+        }
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        if (t.identifier === input.joyTouchId) {
+            input.joyCurrent = { x: t.clientX, y: t.clientY };
+            let dx = input.joyCurrent.x - input.joyOrigin.x;
+            let dy = input.joyCurrent.y - input.joyOrigin.y;
+            let dist = Math.hypot(dx, dy);
+            let maxDist = 50; // Joystick max drag radius
+            if (dist > maxDist) {
+                dx = (dx / dist) * maxDist;
+                dy = (dy / dist) * maxDist;
+            }
+            input.joyX = dx / maxDist;
+            input.joyY = dy / maxDist;
+        }
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        if (t.identifier === input.joyTouchId) {
+            input.joyTouchId = null;
+            input.joyX = 0;
+            input.joyY = 0;
+        }
+        if (t.identifier === input.kickTouchId) {
+            input.kickTouchId = null;
+            input.kickPressed = false;
+            executeKick(player, input.kickCharge);
+            input.kickCharge = 0;
+        }
+    }
+}, { passive: false });
+
+// --- KEYBOARD FALLBACK (For testing on PC) ---
+const keys = {};
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (e.code === 'Space' && !input.kickPressed) {
+        input.kickPressed = true;
+        input.kickCharge = 1;
+    }
+});
+window.addEventListener('keyup', e => {
+    keys[e.code] = false;
+    if (e.code === 'Space') {
+        input.kickPressed = false;
+        executeKick(player, input.kickCharge);
+        input.kickCharge = 0;
+    }
+});
+
+// --- KICK OFF 2 MECHANICS ---
+function handleDribble(p) {
+    let dx = ball.x - p.x;
+    let dy = ball.y - p.y;
+    let dist = Math.hypot(dx, dy);
+
+    // Only interact if ball is near ground
+    if (dist < p.radius + ball.radius && ball.z < 12) {
+        let angle = Math.atan2(dy, dx);
+        let pSpeed = Math.hypot(p.vx, p.vy);
+        
+        // THE KICK OFF 2 FEEL: Push the ball ahead, don't glue it!
+        // The faster you run, the further the ball bounces ahead of your feet.
+        let pushForce = pSpeed * 1.45 + 1.8; 
+        ball.vx = Math.cos(angle) * pushForce;
+        ball.vy = Math.sin(angle) * pushForce;
+        
+        // Prevent overlap
+        let overlap = (p.radius + ball.radius) - dist;
+        ball.x += Math.cos(angle) * overlap;
+        ball.y += Math.sin(angle) * overlap;
+        ball.lastKicker = p;
+    }
+}
+
+function executeKick(p, charge) {
+    let dx = ball.x - p.x;
+    let dy = ball.y - p.y;
+    let dist = Math.hypot(dx, dy);
+
+    // Slightly larger radius to allow kicking just after a dribble touch
+    if (dist < p.radius + ball.radius + 14 && ball.z < 20) {
+        let power = 7 + (charge / 35) * 10; // Base power + charge
+        ball.vx = p.dirX * power + (p.vx * 0.3);
+        ball.vy = p.dirY * power + (p.vy * 0.3);
+        ball.vz = 2.5 + (charge / 35) * 6.5; // Chip / loft height
+        ball.lastKicker = p;
+    }
+}
+
+function resetPositions(scoringTeam) {
+    isResetting = true;
+    const msg = document.getElementById('message');
+    msg.style.display = 'block';
+    
+    if (scoringTeam === 1) scoreP1++;
+    if (scoringTeam === 2) scoreP2++;
+    
+    document.getElementById('score-p1').innerText = scoreP1;
+    document.getElementById('score-p2').innerText = scoreP2;
+
+    setTimeout(() => {
+        ball.x = PITCH_W / 2;
+        ball.y = PITCH_H / 2;
+        ball.z = 0;
+        ball.vx = 0; ball.vy = 0; ball.vz = 0;
+
+        player.x = PITCH_W / 2;
+        player.y = PITCH_H / 2 + 120;
+        
+        cpu.x = PITCH_W / 2;
+        cpu.y = PITCH_H / 2 - 120;
+
+        msg.style.display = 'none';
+        isResetting = false;
+    }, 2000);
+}
+
+// --- MAIN GAME LOOP ---
+function update() {
+    if (isResetting) return;
+
+    // Keyboard input override if no touch active
+    if (input.joyTouchId === null) {
+        input.joyX = (keys['ArrowRight'] || keys['KeyD'] ? 1 : 0) - (keys['ArrowLeft'] || keys['KeyA'] ? 1 : 0);
+        input.joyY = (keys['ArrowDown'] || keys['KeyS'] ? 1 : 0) - (keys['ArrowUp'] || keys['KeyW'] ? 1 : 0);
+        let mag = Math.hypot(input.joyX, input.joyY);
+        if (mag > 1) { input.joyX /= mag; input.joyY /= mag; }
+    }
+
+    // Charge kick
+    if (input.kickPressed && input.kickCharge < 35) {
+        input.kickCharge++;
+    }
+
+    // Update Player
+    player.vx = input.joyX * player.speed;
+    player.vy = input.joyY * player.speed;
+    player.x += player.vx;
+    player.y += player.vy;
+
+    if (Math.hypot(player.vx, player.vy) > 0.2) {
+        let mag = Math.hypot(player.vx, player.vy);
+        player.dirX = player.vx / mag;
+        player.dirY = player.vy / mag;
+    }
+
+    // Update CPU (Simple AI: Chase ball and kick towards bottom goal)
+    let cpuDx = ball.x - cpu.x;
+    let cpuDy = (ball.y - 10) - cpu.y; // Aim slightly behind the ball
+    let cpuDist = Math.hypot(cpuDx, cpuDy);
+    if (cpuDist > 5) {
+        cpu.vx = (cpuDx / cpuDist) * cpu.speed;
+        cpu.vy = (cpuDy / cpuDist) * cpu.speed;
+        cpu.x += cpu.vx;
+        cpu.y += cpu.vy;
+        cpu.dirX = cpu.vx / cpu.speed;
+        cpu.dirY = cpu.vy / cpu.speed;
+    }
+    // CPU Shoots if close to player's goal
+    if (cpuDist < cpu.radius + ball.radius + 8 && ball.y > PITCH_H - 450 && cpu.vy > 0) {
+        cpu.dirX = ((PITCH_W / 2) - cpu.x) * 0.003; // Aim at center of goal
+        cpu.dirY = 1;
+        executeKick(cpu, 20);
+    }
+
+    // Dribbling physics
+    handleDribble(player);
+    handleDribble(cpu);
+
+    // Update Ball Physics
+    ball.x += ball.vx;
+    ball.y += ball.vy;
+    ball.z += ball.vz;
+
+    // Gravity & Bounce
+    if (ball.z > 0) {
+        ball.vz -= 0.22; // Gravity
+        ball.vx *= 0.992; // Air resistance
+        ball.vy *= 0.992;
+        
+        // KICK OFF 2 AFTERTOUCH ("SWAZ")!
+        // Pulling joystick while ball is in the air curves it
+        if (ball.lastKicker === player) {
+            ball.vx += input.joyX * 0.12;
+            ball.vy += input.joyY * 0.12;
+        }
+    } else {
+        ball.z = 0;
+        if (Math.abs(ball.vz) > 1.2) {
+            ball.vz = -ball.vz * 0.55; // Bounce off turf
+        } else {
+            ball.vz = 0;
+        }
+        // Grass Friction
+        ball.vx *= 0.96;
+        ball.vy *= 0.96;
+    }
+
+    // --- PITCH BOUNDARIES & GOALS ---
+    const goalLeft = (PITCH_W - GOAL_W) / 2;
+    const goalRight = (PITCH_W + GOAL_W) / 2;
+
+    // Top Goal (Player scores on CPU)
+    if (ball.y < 50 && ball.x > goalLeft && ball.x < goalRight && ball.z < 35) {
+        if (ball.y < 50 - GOAL_DEPTH) {
+            resetPositions(1);
+            return;
+        }
+    } else if (ball.y < 50 + ball.radius) {
+        ball.y = 50 + ball.radius;
+        ball.vy = -ball.vy * 0.7;
+    }
+
+    // Bottom Goal (CPU scores on Player)
+    if (ball.y > PITCH_H - 50 && ball.x > goalLeft && ball.x < goalRight && ball.z < 35) {
+        if (ball.y > PITCH_H - 50 + GOAL_DEPTH) {
+            resetPositions(2);
+            return;
+        }
+    } else if (ball.y > PITCH_H - 50 - ball.radius) {
+        ball.y = PITCH_H - 50 - ball.radius;
+        ball.vy = -ball.vy * 0.7;
+    }
+
+    // Sidelines
+    if (ball.x < 50 + ball.radius) { ball.x = 50 + ball.radius; ball.vx = -ball.vx * 0.7; }
+    if (ball.x > PITCH_W - 50 - ball.radius) { ball.x = PITCH_W - 50 - ball.radius; ball.vx = -ball.vx * 0.7; }
+
+    // Camera smoothly follows the ball
+    camera.x += ((ball.x - canvas.width / 2) - camera.x) * 0.1;
+    camera.y += ((ball.y - canvas.height / 2) - camera.y) * 0.1;
+    // Clamp camera to pitch edges
+    camera.x = Math.max(0, Math.min(PITCH_W - canvas.width, camera.x));
+    camera.y = Math.max(0, Math.min(PITCH_H - canvas.height, camera.y));
+}
+
+// --- RENDERING ---
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+
+    // 1. Draw Classic Striped Turf
+    const stripeHeight = 80;
+    for (let y = 0; y < PITCH_H; y += stripeHeight) {
+        ctx.fillStyle = (y / stripeHeight) % 2 === 0 ? '#2b8a3e' : '#37b24d';
+        ctx.fillRect(0, y, PITCH_W, stripeHeight);
+    }
+
+    // 2. Pitch Lines
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(50, 50, PITCH_W - 100, PITCH_H - 100); // Outer lines
+
+    // Halfway line & Center circle
+    ctx.beginPath();
+    ctx.moveTo(50, PITCH_H / 2);
+    ctx.lineTo(PITCH_W - 50, PITCH_H / 2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(PITCH_W / 2, PITCH_H / 2, 90, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Penalty Boxes
+    ctx.strokeRect((PITCH_W - 400) / 2, 50, 400, 180);
+    ctx.strokeRect((PITCH_W - 400) / 2, PITCH_H - 230, 400, 180);
+
+    // Goals
+    ctx.strokeRect((PITCH_W - GOAL_W) / 2, 50 - GOAL_DEPTH, GOAL_W, GOAL_DEPTH);
+    ctx.strokeRect((PITCH_W - GOAL_W) / 2, PITCH_H - 50, GOAL_W, GOAL_DEPTH);
+
+    // 3. Draw Players
+    function drawPlayer(p) {
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.arc(p.x + 3, p.y + 4, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Body (Shoulders/Kit)
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#fff';
+        ctx.stroke();
+
+        // Direction indicator / Head (Amiga top-down style)
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(p.x + p.dirX * 5, p.y + p.dirY * 5, 6, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    drawPlayer(player);
+    drawPlayer(cpu);
+
+    // 4. Draw Ball & Shadow (Crucial for judging height in Kick Off 2)
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath();
+    ctx.arc(ball.x + ball.z * 0.6, ball.y + ball.z * 0.6, ball.radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    let visualRadius = ball.radius + (ball.z * 0.18); // Ball grows bigger as it goes higher
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y - ball.z, visualRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+
+    ctx.restore();
+
+    // --- 5. DRAW ON-SCREEN CONTROLS & RADAR ---
+    // Mini-Radar (Top Left)
+    const radarScale = 0.08;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(15, 15, PITCH_W * radarScale, PITCH_H * radarScale);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(15, 15, PITCH_W * radarScale, PITCH_H * radarScale);
+    
+    // Radar Dots
+    ctx.fillStyle = '#0066ff';
+    ctx.fillRect(15 + player.x * radarScale - 2, 15 + player.y * radarScale - 2, 5, 5);
+    ctx.fillStyle = '#ff2200';
+    ctx.fillRect(15 + cpu.x * radarScale - 2, 15 + cpu.y * radarScale - 2, 5, 5);
+    ctx.fillStyle = '#ffff00';
+    ctx.fillRect(15 + ball.x * radarScale - 2, 15 + ball.y * radarScale - 2, 4, 4);
+
+    // Virtual Joystick UI
+    if (input.joyTouchId !== null) {
+        ctx.beginPath();
+        ctx.arc(input.joyOrigin.x, input.joyOrigin.y, 50, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(input.joyOrigin.x + input.joyX * 50, input.joyOrigin.y + input.joyY * 50, 25, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+        ctx.fill();
+    } else {
+        // Hint text for controls
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.font = '14px Courier New';
+        ctx.fillText('DRAG LEFT SIDE TO MOVE', 25, canvas.height - 30);
+    }
+
+    // Kick Button UI (Bottom Right)
+    let btnX = canvas.width - 90;
+    let btnY = canvas.height - 90;
+    ctx.beginPath();
+    ctx.arc(btnX, btnY, 45, 0, Math.PI * 2);
+    ctx.fillStyle = input.kickPressed ? 'rgba(255, 50, 50, 0.8)' : 'rgba(255, 255, 255, 0.25)';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('KICK', btnX, btnY + 5);
+    ctx.textAlign = 'left'; // Reset
+}
+
+function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
